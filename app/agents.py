@@ -1,298 +1,503 @@
+"""
+SysSentinel Agent Definitions
+==============================
+Multi-agent IT Incident Resolution system built on Google ADK + Gemini.
+
+Run modes (auto-detected from environment):
+  1. LIVE ADK    — GEMINI_API_KEY + google-adk installed → full Gemini reasoning
+  2. LIVE GENAI  — GEMINI_API_KEY only (no ADK) → direct google-generativeai
+  3. MOCK        — No API key → deterministic simulation for offline demos
+
+MCP Partner: Elastic (https://rapid-agent.devpost.com — Elastic track)
+  Set ELASTICSEARCH_URL + ELASTICSEARCH_API_KEY in .env to activate live search.
+"""
+
 import os
 import json
 import re
+import asyncio
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# --- Configuration & Mode Detection ---
-USE_MOCK = True
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+# ─── Configuration ─────────────────────────────────────────────────────────────
+
+GEMINI_API_KEY      = os.environ.get("GEMINI_API_KEY", "")
+ELASTICSEARCH_URL   = os.environ.get("ELASTICSEARCH_URL", "")
+ELASTICSEARCH_API_KEY = os.environ.get("ELASTICSEARCH_API_KEY", "")
+GEMINI_MODEL        = "gemini-2.5-flash"
+
+# Determine run mode
+RUN_MODE = "MOCK"
+_adk_available = False
+_genai_available = False
 
 try:
     if GEMINI_API_KEY:
         import google.generativeai as genai
-        # Configure the Google GenAI SDK
         genai.configure(api_key=GEMINI_API_KEY)
-        
-        # Try importing ADK
+        _genai_available = True
+
         try:
             from google.adk.agents import Agent
-            print("[SysSentinel] Successfully loaded Google ADK and configured Gemini API.")
-            USE_MOCK = False
+            from google.adk.runners import Runner
+            from google.adk.sessions import InMemorySessionService
+            from google.genai.types import Content, Part
+            _adk_available = True
+            RUN_MODE = "LIVE_ADK"
+            print(f"[SysSentinel] [OK] Google ADK + Gemini API active (model: {GEMINI_MODEL})")
         except ImportError:
-            # Fallback to direct GenAI if ADK is missing but API key is available
-            print("[SysSentinel] Google ADK library not found, but GEMINI_API_KEY is present. Using direct Gemini GenAI fallback.")
-            USE_MOCK = False
+            RUN_MODE = "LIVE_GENAI"
+            print(f"[SysSentinel] [OK] Gemini API active (direct genai, no ADK). Model: {GEMINI_MODEL}")
     else:
-        print("[SysSentinel] GEMINI_API_KEY environment variable not set. Running in MOCK/SIMULATION mode.")
+        print("[SysSentinel] [MOCK] GEMINI_API_KEY not set - running in MOCK/SIMULATION mode")
 except Exception as e:
-    print(f"[SysSentinel] Setup error ({e}). Running in MOCK/SIMULATION mode.")
+    print(f"[SysSentinel] [WARN] Setup error ({e}) - falling back to MOCK mode")
+
+# MCP Elastic status
+MCP_ELASTIC_ACTIVE = bool(ELASTICSEARCH_URL and ELASTICSEARCH_API_KEY)
+if MCP_ELASTIC_ACTIVE:
+    print(f"[SysSentinel] [MCP] Elastic MCP configured -> {ELASTICSEARCH_URL}")
+else:
+    print("[SysSentinel] [KB] Elastic MCP not configured - using mock knowledge base")
 
 
-# --- Simulated Tools / Data Sources ---
+# --- Simulated Diagnostic Tools (MCP-compatible function signatures) -----------
 
 def check_disk_space(server_id: str) -> str:
-    """Queries the server for disk space usage.
-    
+    """Query disk space usage on the target server.
+
     Args:
         server_id: The hostname or ID of the server (e.g. 'prod-web-02', 'prod-db-01')
+
+    Returns:
+        JSON string with disk usage statistics.
     """
-    server_id = server_id.lower()
-    if "web" in server_id or "web-02" in server_id:
+    s = server_id.lower()
+    if "web" in s:
         return json.dumps({
-            "server": server_id,
-            "status": "CRITICAL",
-            "disk_usage": "97%",
-            "available_space": "1.2GB",
-            "partition": "/var/log"
+            "server": server_id, "status": "CRITICAL",
+            "disk_usage": "97%", "available_space": "1.2GB",
+            "partition": "/var/log", "inode_usage": "88%"
         })
-    elif "db" in server_id or "db-01" in server_id:
+    elif "db" in s:
         return json.dumps({
-            "server": server_id,
-            "status": "OK",
-            "disk_usage": "48%",
-            "available_space": "120GB",
-            "partition": "/data"
+            "server": server_id, "status": "OK",
+            "disk_usage": "48%", "available_space": "120GB",
+            "partition": "/data", "inode_usage": "12%"
         })
-    else:
-        return json.dumps({
-            "server": server_id,
-            "status": "OK",
-            "disk_usage": "35%",
-            "available_space": "15GB",
-            "partition": "/"
-        })
+    return json.dumps({
+        "server": server_id, "status": "OK",
+        "disk_usage": "35%", "available_space": "15GB", "partition": "/"
+    })
 
 
 def check_db_connections(server_id: str) -> str:
-    """Checks active connection pools and database statistics.
-    
+    """Check active database connection pool statistics.
+
     Args:
-        server_id: The database server ID or hostname.
+        server_id: The database server hostname or ID.
+
+    Returns:
+        JSON string with connection pool metrics.
     """
-    server_id = server_id.lower()
-    if "db" in server_id or "db-01" in server_id:
+    s = server_id.lower()
+    if "db" in s:
         return json.dumps({
-            "server": server_id,
-            "status": "CRITICAL",
-            "active_connections": 198,
-            "max_connections": 200,
-            "connection_state": "Exhausted",
-            "slow_queries": 12
+            "server": server_id, "status": "CRITICAL",
+            "active_connections": 198, "max_connections": 200,
+            "connection_state": "Exhausted", "slow_queries": 12,
+            "avg_query_time_ms": 4230, "deadlocks_last_hour": 3
         })
-    else:
-        return json.dumps({
-            "server": server_id,
-            "status": "WARNING",
-            "active_connections": 5,
-            "max_connections": 50,
-            "connection_state": "Idle"
-        })
+    return json.dumps({
+        "server": server_id, "status": "WARNING",
+        "active_connections": 5, "max_connections": 50,
+        "connection_state": "Idle", "slow_queries": 0
+    })
 
 
 def get_process_list(server_id: str) -> str:
-    """Gets the top CPU and Memory intensive processes on the target server.
-    
+    """Get top CPU and memory intensive processes on the server.
+
     Args:
         server_id: Target server hostname.
+
+    Returns:
+        JSON string listing top processes.
     """
-    server_id = server_id.lower()
-    if "web" in server_id:
+    s = server_id.lower()
+    if "web" in s:
         return json.dumps({
             "server": server_id,
             "processes": [
-                {"pid": 1205, "name": "nginx-worker", "cpu": "85.2%", "memory": "2.1%"},
-                {"pid": 1206, "name": "nginx-worker", "cpu": "12.4%", "memory": "1.8%"},
-                {"pid": 943, "name": "systemd-journal", "cpu": "0.1%", "memory": "0.5%"}
+                {"pid": 1205, "name": "nginx-worker", "cpu": "85.2%", "memory": "2.1%", "state": "R"},
+                {"pid": 1206, "name": "nginx-worker", "cpu": "12.4%", "memory": "1.8%", "state": "R"},
+                {"pid": 943,  "name": "systemd-journal", "cpu": "0.1%", "memory": "0.5%", "state": "S"},
             ]
         })
-    elif "db" in server_id:
+    elif "db" in s:
         return json.dumps({
             "server": server_id,
             "processes": [
-                {"pid": 4501, "name": "postgres-backend", "cpu": "45.0%", "memory": "15.2%"},
-                {"pid": 4502, "name": "postgres-backend", "cpu": "38.5%", "memory": "12.1%"},
-                {"pid": 801, "name": "sshd", "cpu": "0.1%", "memory": "0.2%"}
+                {"pid": 4501, "name": "postgres-backend", "cpu": "45.0%", "memory": "15.2%", "state": "R"},
+                {"pid": 4502, "name": "postgres-backend", "cpu": "38.5%", "memory": "12.1%", "state": "R"},
+                {"pid": 801,  "name": "sshd",             "cpu": "0.1%",  "memory": "0.2%",  "state": "S"},
             ]
         })
+    return json.dumps({"server": server_id, "processes": [
+        {"pid": 1, "name": "systemd", "cpu": "0.0%", "memory": "0.1%", "state": "S"}
+    ]})
+
+
+# ─── Elastic MCP Knowledge Base Tool ───────────────────────────────────────────
+
+def search_incident_knowledge_base(query: str, max_results: int = 3) -> str:
+    """Search the Elastic knowledge base for historical incidents matching the query.
+
+    When ELASTICSEARCH_URL and ELASTICSEARCH_API_KEY are set in the environment,
+    this tool connects to a live Elasticsearch cluster via the Elastic MCP Server
+    (https://github.com/elastic/mcp-server-elasticsearch) and queries real incident
+    ticket data using semantic search.
+
+    When not configured, returns curated simulated ticket data for demo purposes.
+
+    Args:
+        query: Natural language description of the current incident.
+        max_results: Maximum number of historical matches to return.
+
+    Returns:
+        JSON string with list of matching historical incidents and resolutions.
+    """
+    if MCP_ELASTIC_ACTIVE:
+        # ── Live Elastic MCP path ──────────────────────────────────────────────
+        # The Elastic MCP Server exposes the `search` tool which this function
+        # delegates to. In a full ADK deployment, this would be an MCPToolset
+        # registered with the RAG agent. Here we call the REST API directly
+        # so the function is usable in both ADK and fallback GenAI modes.
+        try:
+            import httpx
+            headers = {
+                "Authorization": f"ApiKey {ELASTICSEARCH_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "query": {
+                    "multi_match": {
+                        "query": query,
+                        "fields": ["title^2", "description", "resolution", "tags"],
+                        "type": "best_fields"
+                    }
+                },
+                "size": max_results
+            }
+            resp = httpx.post(
+                f"{ELASTICSEARCH_URL}/incidents/_search",
+                json=payload, headers=headers, timeout=10.0
+            )
+            resp.raise_for_status()
+            hits = resp.json().get("hits", {}).get("hits", [])
+            matches = [
+                {
+                    "ticket_id": h["_source"].get("ticket_id", h["_id"]),
+                    "title":       h["_source"].get("title", ""),
+                    "root_cause":  h["_source"].get("root_cause", ""),
+                    "resolution":  h["_source"].get("resolution", ""),
+                    "score":       round(h["_score"], 3)
+                }
+                for h in hits
+            ]
+            return json.dumps({
+                "source": "elastic_mcp_live",
+                "query": query,
+                "historical_matches": matches
+            }, indent=2)
+        except Exception as e:
+            print(f"[Elastic MCP] [WARN] Live search failed ({e}), falling back to mock data")
+
+    # ── Mock / offline path ────────────────────────────────────────────────────
+    mock_tickets = [
+        {
+            "ticket_id": "INC-1024",
+            "title":      "Database connection pool timeout in prod-db-01",
+            "root_cause": "Active connections reached connection pool limit (200/200).",
+            "resolution": "Run pg_terminate_backend on idle connections older than 5 min. "
+                          "Increase max_connections to 300 in postgresql.conf and reload.",
+            "score": 0.98
+        },
+        {
+            "ticket_id": "INC-2048",
+            "title":      "Disk space low /var/log/nginx on prod-web-02",
+            "root_cause": "Nginx access logs accumulated without rotation (logrotate misconfigured).",
+            "resolution": "Truncate /var/log/nginx/access.log, force logrotate run, "
+                          "set daily rotation with 7-day retention in /etc/logrotate.d/nginx.",
+            "score": 0.97
+        },
+        {
+            "ticket_id": "INC-3072",
+            "title":      "High CPU usage on api-gateway-01 during peak hours",
+            "root_cause": "Unoptimized SQL queries in payment service causing full table scans.",
+            "resolution": "Add composite index on (user_id, created_at). "
+                          "Enable slow query log and review EXPLAIN plans.",
+            "score": 0.89
+        }
+    ]
+    ql = query.lower()
+    if any(kw in ql for kw in ["db", "database", "timeout", "connection"]):
+        matched = [mock_tickets[0]]
+    elif any(kw in ql for kw in ["disk", "log", "space", "web"]):
+        matched = [mock_tickets[1]]
     else:
-        return json.dumps({
-            "server": server_id,
-            "processes": [
-                {"pid": 111, "name": "systemd", "cpu": "0.0%", "memory": "0.1%"}
-            ]
-        })
+        matched = [mock_tickets[2]]
+
+    return json.dumps({
+        "source": "mock_knowledge_base",
+        "elastic_mcp_configured": MCP_ELASTIC_ACTIVE,
+        "query": query,
+        "historical_matches": matched[:max_results]
+    }, indent=2)
 
 
-# --- Mock Agent Definition (Fallback) ---
+# ─── Mock Agent (zero-dependency offline mode) ─────────────────────────────────
 
 class MockAgent:
+    """Deterministic rule-based agent for offline/demo use. No API calls."""
+
     def __init__(self, name: str, instruction: str, tools=None):
         self.name = name
         self.instruction = instruction
         self.tools = tools or []
 
     def run(self, prompt: str) -> str:
-        prompt_lower = prompt.lower()
-        
+        ql = prompt.lower()
+
         if self.name == "triage_agent":
-            # Categorize the alert
-            severity = "HIGH"
-            category = "Infrastructure"
-            target_server = "unknown-server"
-            
-            # Find target server in prompt
-            server_match = re.search(r'(prod-web-\d+|prod-db-\d+|api-\w+)', prompt_lower)
-            if server_match:
-                target_server = server_match.group(1)
-                
-            if "database" in prompt_lower or "db" in prompt_lower or "timeout" in prompt_lower:
-                category = "Database"
-                severity = "CRITICAL"
-                if target_server == "unknown-server":
-                    target_server = "prod-db-01"
-            elif "cpu" in prompt_lower or "memory" in prompt_lower or "disk" in prompt_lower or "space" in prompt_lower:
-                category = "Infrastructure"
-                severity = "HIGH"
-                if target_server == "unknown-server":
-                    target_server = "prod-web-02"
-                    
+            server = "unknown-server"
+            m = re.search(r'(prod-web-\d+|prod-db-\d+|api-[\w-]+)', ql)
+            if m:
+                server = m.group(1)
+            if any(k in ql for k in ["database","db","timeout","connection","postgres","mysql"]):
+                cat, sev = "Database", "CRITICAL"
+                if server == "unknown-server": server = "prod-db-01"
+            elif any(k in ql for k in ["cpu","memory","load","oom"]):
+                cat, sev = "Compute", "HIGH"
+                if server == "unknown-server": server = "prod-web-02"
+            elif any(k in ql for k in ["disk","space","storage","inode","log"]):
+                cat, sev = "Infrastructure", "HIGH"
+                if server == "unknown-server": server = "prod-web-02"
+            elif any(k in ql for k in ["network","latency","packet","dns","ssl"]):
+                cat, sev = "Network", "MEDIUM"
+                if server == "unknown-server": server = "api-gateway-01"
+            else:
+                cat, sev = "Infrastructure", "MEDIUM"
+                if server == "unknown-server": server = "prod-web-02"
+
             return json.dumps({
                 "alert": prompt,
-                "category": category,
-                "severity": severity,
-                "target_server": target_server,
-                "triage_summary": f"Identified a {severity} severity {category} issue affecting {target_server}."
+                "category": cat,
+                "severity": sev,
+                "target_server": server,
+                "triage_summary": f"{sev} severity {cat} incident detected on {server}."
             }, indent=2)
 
         elif self.name == "rag_agent":
-            # Search database
-            tickets = [
-                {
-                    "ticket_id": "INC-1024",
-                    "title": "Database connection timeout in prod-db-01",
-                    "root_cause": "Active connections reached connection pool limit (200).",
-                    "resolution": "Run pg_terminate_backend on idle connections. Reconfigure pool size."
-                },
-                {
-                    "ticket_id": "INC-2048",
-                    "title": "Disk space low /var/log/nginx on prod-web-02",
-                    "root_cause": "Nginx access logs accumulated without rotation.",
-                    "resolution": "Truncate /var/log/nginx/access.log, force logrotate run, update logrotate cron configuration."
-                }
-            ]
-            
-            matched = []
-            if "db" in prompt_lower or "database" in prompt_lower or "timeout" in prompt_lower:
-                matched.append(tickets[0])
-            if "disk" in prompt_lower or "web" in prompt_lower or "log" in prompt_lower:
-                matched.append(tickets[1])
-                
-            if not matched:
-                matched.append({
-                    "ticket_id": "INC-GENERIC",
-                    "title": "Generic resource alert",
-                    "root_cause": "Underlying process consuming excessive system resources.",
-                    "resolution": "Gather thread dumps, analyze CPU processes, and restart service."
-                })
-                
-            return json.dumps({
-                "query": prompt,
-                "historical_matches": matched
-            }, indent=2)
+            return search_incident_knowledge_base(prompt)
 
         elif self.name == "diagnostic_agent":
-            # Extract server from prompt
-            target_server = "prod-web-02"
-            if "db" in prompt_lower or "db-01" in prompt_lower:
-                target_server = "prod-db-01"
-                
-            # Simulate calling the correct tool
-            diag_output = ""
-            patch_script = ""
-            action_plan = ""
-            
-            if target_server == "prod-db-01":
-                db_stats = check_db_connections(target_server)
-                processes = get_process_list(target_server)
-                diag_output = f"DB Status: {db_stats}\nTop Processes: {processes}"
-                patch_script = "sudo -u postgres psql -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle' AND state_change < now() - interval '5 minutes';\""
-                action_plan = "Terminate idle connections holding onto connection pool slots. Increase database max_connections parameter to 300."
+            server = "prod-db-01" if any(k in ql for k in ["db","database","postgres","connection"]) \
+                     else "prod-web-02"
+            if "db" in server:
+                db  = json.loads(check_db_connections(server))
+                ps  = json.loads(get_process_list(server))
+                diag = f"DB connections: {db['active_connections']}/{db['max_connections']} " \
+                       f"({db['connection_state']}), slow queries: {db['slow_queries']}, " \
+                       f"deadlocks/hr: {db.get('deadlocks_last_hour',0)}"
+                patch = ('sudo -u postgres psql -c "SELECT pg_terminate_backend(pid) '
+                         "FROM pg_stat_activity WHERE state = 'idle' "
+                         "AND state_change < now() - interval '5 minutes';\"")
+                plan  = ("1. Terminate idle Postgres connections (patch below).\n"
+                         "2. Increase max_connections to 300 in postgresql.conf.\n"
+                         "3. Set idle_in_transaction_session_timeout = '5min'.\n"
+                         "4. Monitor pg_stat_activity for recurrence.")
             else:
-                disk_stats = check_disk_space(target_server)
-                processes = get_process_list(target_server)
-                diag_output = f"Disk Space: {disk_stats}\nTop Processes: {processes}"
-                patch_script = "sudo truncate -s 0 /var/log/nginx/access.log && sudo logrotate -f /etc/logrotate.d/nginx"
-                action_plan = "Truncate the bloated Nginx access logs to reclaim disk space immediately. Force log rotation."
+                dk  = json.loads(check_disk_space(server))
+                ps  = json.loads(get_process_list(server))
+                diag = f"Disk: {dk['disk_usage']} used on {dk['partition']} " \
+                       f"(only {dk['available_space']} free), inodes: {dk.get('inode_usage','N/A')}"
+                patch = ("sudo truncate -s 0 /var/log/nginx/access.log\n"
+                         "sudo logrotate -f /etc/logrotate.d/nginx\n"
+                         "sudo find /var/log -name '*.gz' -mtime +7 -delete")
+                plan  = ("1. Truncate bloated Nginx access log (patch below).\n"
+                         "2. Force log rotation to create fresh log file.\n"
+                         "3. Remove compressed logs older than 7 days.\n"
+                         "4. Verify logrotate cron runs daily: crontab -l | grep logrotate")
 
             return json.dumps({
-                "server": target_server,
-                "diagnostic_run": diag_output,
-                "recommended_patch_script": patch_script,
-                "action_plan": action_plan
+                "server": server,
+                "diagnostic_summary": diag,
+                "top_processes": ps["processes"][:3],
+                "recommended_patch_script": patch,
+                "action_plan": plan
             }, indent=2)
 
-        return "Mock response"
+        return json.dumps({"response": "Mock agent completed"})
 
 
-# --- Real Gemini SDK Fallback Class ---
+# ─── Live Gemini GenAI Agent (API key, no ADK) ─────────────────────────────────
 
-class GeminiAgent:
+class GenAIAgent:
+    """Agent backed by google-generativeai SDK when ADK is unavailable."""
+
+    TOOL_MAP = {
+        "check_disk_space":               check_disk_space,
+        "check_db_connections":           check_db_connections,
+        "get_process_list":               get_process_list,
+        "search_incident_knowledge_base": search_incident_knowledge_base,
+    }
+
     def __init__(self, name: str, instruction: str, tools=None):
         self.name = name
         self.instruction = instruction
-        self.tools = tools or []
+        self.tool_fns = tools or []
         self.model = genai.GenerativeModel(
-            model_name="gemini-2.5-flash",
+            model_name=GEMINI_MODEL,
             system_instruction=instruction,
-            tools=self.tools if self.tools else None
+            tools=self.tool_fns if self.tool_fns else None
         )
 
     def run(self, prompt: str) -> str:
         try:
-            response = self.model.generate_content(prompt)
-            # If the model used tools, call them. 
-            # In a full ADK implementation, the framework handles this loop automatically.
-            # Here, we do a basic function calling execution handler if model wants tool call.
-            if response.candidates and response.candidates[0].function_calls:
-                call = response.candidates[0].function_calls[0]
-                tool_func = None
-                for t in self.tools:
-                    if t.__name__ == call.name:
-                        tool_func = t
-                        break
-                if tool_func:
-                    # Executing function tool
-                    args = dict(call.args)
-                    tool_result = tool_func(**args)
-                    # Send result back to model
-                    chat = self.model.start_chat()
-                    follow_up = chat.send_message(f"Tool {call.name} returned: {tool_result}. Please summarize the final resolution.")
-                    return follow_up.text
-            return response.text
+            chat = self.model.start_chat()
+            resp = chat.send_message(prompt)
+
+            # Execute any requested tool calls and feed results back
+            for _ in range(5):  # max tool call rounds
+                calls = [p.function_call for p in resp.candidates[0].content.parts
+                         if hasattr(p, "function_call") and p.function_call.name]
+                if not calls:
+                    break
+                tool_responses = []
+                for call in calls:
+                    fn = self.TOOL_MAP.get(call.name)
+                    result = fn(**dict(call.args)) if fn else f"Unknown tool: {call.name}"
+                    tool_responses.append(
+                        genai.protos.Part(
+                            function_response=genai.protos.FunctionResponse(
+                                name=call.name,
+                                response={"result": result}
+                            )
+                        )
+                    )
+                resp = chat.send_message(tool_responses)
+
+            return resp.text
         except Exception as e:
-            print(f"[GeminiAgent {self.name}] Error running LLM call ({e}). Falling back to simulation.")
-            fallback_mock = MockAgent(self.name, self.instruction, self.tools)
-            return fallback_mock.run(prompt)
+            print(f"[GenAIAgent:{self.name}] Error: {e} - falling back to mock")
+            return MockAgent(self.name, self.instruction, self.tool_fns).run(prompt)
 
 
-# --- Factory Function for Agents ---
+# ─── Live ADK Agent ─────────────────────────────────────────────────────────────
+
+class ADKAgent:
+    """Full Google ADK-backed agent with Gemini reasoning and MCP toolset support."""
+
+    def __init__(self, name: str, instruction: str, tools=None):
+        self.name = name
+        self.instruction = instruction
+        self.tool_fns = tools or []
+        self._agent = None
+        self._runner = None
+        self._session_service = None
+        self._build()
+
+    def _build(self):
+        try:
+            # Register MCP Elastic toolset if configured
+            all_tools = list(self.tool_fns)
+            if MCP_ELASTIC_ACTIVE and self.name == "rag_agent":
+                try:
+                    from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset, StdioServerParameters
+                    elastic_mcp = MCPToolset(
+                        connection_params=StdioServerParameters(
+                            command="npx",
+                            args=["-y", "@elastic/mcp-server-elasticsearch@latest"],
+                            env={
+                                "ES_URL":     ELASTICSEARCH_URL,
+                                "ES_API_KEY": ELASTICSEARCH_API_KEY,
+                            }
+                        )
+                    )
+                    all_tools.append(elastic_mcp)
+                    print(f"[ADKAgent:{self.name}] [MCP] Elastic MCP toolset registered")
+                except Exception as e:
+                    print(f"[ADKAgent:{self.name}] [WARN] Elastic MCP registration failed: {e}")
+
+            self._agent = Agent(
+                name=self.name,
+                model=GEMINI_MODEL,
+                instruction=self.instruction,
+                tools=all_tools if all_tools else None,
+            )
+            self._session_service = InMemorySessionService()
+            self._runner = Runner(
+                agent=self._agent,
+                app_name=f"syssentinel_{self.name}",
+                session_service=self._session_service,
+            )
+        except Exception as e:
+            print(f"[ADKAgent:{self.name}] Build failed: {e}")
+            self._runner = None
+
+    def run(self, prompt: str) -> str:
+        if not self._runner:
+            return MockAgent(self.name, self.instruction, self.tool_fns).run(prompt)
+        try:
+            session = asyncio.run(
+                self._session_service.create_session(
+                    app_name=f"syssentinel_{self.name}",
+                    user_id="syssentinel",
+                )
+            )
+            content = Content(role="user", parts=[Part(text=prompt)])
+            events = list(asyncio.run(
+                self._collect_events(session.id, content)
+            ))
+            # Return the last text response from the agent
+            for event in reversed(events):
+                if hasattr(event, "content") and event.content:
+                    for part in event.content.parts:
+                        if hasattr(part, "text") and part.text:
+                            return part.text
+            return json.dumps({"response": "ADK agent produced no text output"})
+        except Exception as e:
+            print(f"[ADKAgent:{self.name}] Runtime error: {e} - falling back to mock")
+            return MockAgent(self.name, self.instruction, self.tool_fns).run(prompt)
+
+    async def _collect_events(self, session_id: str, content):
+        events = []
+        async for event in self._runner.run_async(
+            user_id="syssentinel",
+            session_id=session_id,
+            new_message=content
+        ):
+            events.append(event)
+        return events
+
+
+# ─── Agent Factory ─────────────────────────────────────────────────────────────
 
 def create_agent(name: str, instruction: str, tools=None):
-    if USE_MOCK:
-        return MockAgent(name, instruction, tools)
+    """Instantiate the appropriate agent class based on available credentials."""
+    if RUN_MODE == "LIVE_ADK":
+        return ADKAgent(name, instruction, tools)
+    elif RUN_MODE == "LIVE_GENAI":
+        return GenAIAgent(name, instruction, tools)
     else:
-        # If ADK was successfully loaded, use the ADK Agent
-        try:
-            from google.adk.agents import Agent
-            # Note: Depending on the ADK SDK version, we initialize Agent using name, model, instruction, tools.
-            return Agent(
-                name=name,
-                model="gemini-2.5-flash",
-                instruction=instruction,
-                tools=tools
-            )
-        except Exception:
-            # Fallback to direct Gemini GenAI wrapper if ADK has syntax discrepancy
-            return GeminiAgent(name, instruction, tools)
+        return MockAgent(name, instruction, tools)
+
+
+def get_run_mode() -> str:
+    return RUN_MODE
+
+
+def is_elastic_active() -> bool:
+    return MCP_ELASTIC_ACTIVE
