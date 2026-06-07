@@ -18,6 +18,8 @@ server diagnostics, and generate a ready-to-execute patch script — autonomousl
 
 ## Architecture
 
+![SysSentinel Multi-Agent Architecture](./architecture_diagram.png)
+
 ```
   🚨 Incoming IT Alert
          │
