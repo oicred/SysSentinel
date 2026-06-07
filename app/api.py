@@ -98,7 +98,10 @@ class DiagnosticResult(BaseModel):
 class ResolveResponse(BaseModel):
     alert: str
     run_mode: str
-    elastic_mcp_active: bool
+    elastic_live_search_active: bool
+    knowledge_source: str
+    diagnostics_source: str
+    remediation_requires_approval: bool
     triage: TriageResult
     knowledge_base: RAGResult
     diagnostics: DiagnosticResult
@@ -189,7 +192,10 @@ def run_pipeline(alert: str, context: Optional[str] = None) -> dict:
     return {
         "alert": alert,
         "run_mode": get_run_mode(),
-        "elastic_mcp_active": is_elastic_active(),
+        "elastic_live_search_active": is_elastic_active(),
+        "knowledge_source": rag_data.get("source", "unknown"),
+        "diagnostics_source": "simulated_diagnostic_tools",
+        "remediation_requires_approval": True,
         "triage": triage_data,
         "knowledge_base": rag_data,
         "diagnostics": diag_data,
@@ -207,9 +213,11 @@ def health_check():
         "version": "2.0.0",
         "status": "operational",
         "run_mode": get_run_mode(),
-        "elastic_mcp_active": is_elastic_active(),
+        "elastic_live_search_active": is_elastic_active(),
+        "diagnostics_source": "simulated_diagnostic_tools",
+        "remediation_requires_approval": True,
         "hackathon": "Google Cloud Rapid Agent Hackathon — Track 1: Build",
-        "partner_track": "Elastic",
+        "optional_integration": "Elasticsearch REST API",
         "endpoints": {
             "resolve":  "POST /resolve",
             "examples": "GET  /resolve/examples",
@@ -228,7 +236,8 @@ def resolve_incident(request: ResolveRequest):
       2. RAG Agent       — searches Elastic knowledge base for similar past incidents
       3. Diagnostic Agent — runs server diagnostics and generates a patch script
 
-    Returns a structured incident report with action plan and ready-to-run patch.
+    Returns a structured incident report with an action plan and a remediation
+    script that must be reviewed and approved by an operator before execution.
     """
     if not request.alert or not request.alert.strip():
         raise HTTPException(status_code=422, detail="alert field must not be empty")

@@ -8,8 +8,8 @@ Run modes (auto-detected from environment):
   2. LIVE GENAI  — GEMINI_API_KEY only (no ADK) → direct google-generativeai
   3. MOCK        — No API key → deterministic simulation for offline demos
 
-MCP Partner: Elastic (https://rapid-agent.devpost.com — Elastic track)
-  Set ELASTICSEARCH_URL + ELASTICSEARCH_API_KEY in .env to activate live search.
+Optional integration: Elasticsearch REST API
+  Set ELASTICSEARCH_URL + ELASTICSEARCH_API_KEY in .env to activate live REST search.
 """
 
 import os
@@ -26,6 +26,10 @@ GEMINI_API_KEY      = os.environ.get("GEMINI_API_KEY", "")
 ELASTICSEARCH_URL   = os.environ.get("ELASTICSEARCH_URL", "")
 ELASTICSEARCH_API_KEY = os.environ.get("ELASTICSEARCH_API_KEY", "")
 GEMINI_MODEL        = "gemini-2.5-flash"
+
+# Google ADK reads GOOGLE_API_KEY, while the project exposes GEMINI_API_KEY.
+if GEMINI_API_KEY and not os.environ.get("GOOGLE_API_KEY"):
+    os.environ["GOOGLE_API_KEY"] = GEMINI_API_KEY
 
 # Determine run mode
 RUN_MODE = "MOCK"
@@ -54,12 +58,12 @@ try:
 except Exception as e:
     print(f"[SysSentinel] [WARN] Setup error ({e}) - falling back to MOCK mode")
 
-# MCP Elastic status
+# Elastic live-search status
 MCP_ELASTIC_ACTIVE = bool(ELASTICSEARCH_URL and ELASTICSEARCH_API_KEY)
 if MCP_ELASTIC_ACTIVE:
-    print(f"[SysSentinel] [MCP] Elastic MCP configured -> {ELASTICSEARCH_URL}")
+    print(f"[SysSentinel] [Elastic] Live search configured -> {ELASTICSEARCH_URL}")
 else:
-    print("[SysSentinel] [KB] Elastic MCP not configured - using mock knowledge base")
+    print("[SysSentinel] [KB] Live Elastic search not configured - using mock knowledge base")
 
 
 # --- Simulated Diagnostic Tools (MCP-compatible function signatures) -----------
@@ -149,15 +153,14 @@ def get_process_list(server_id: str) -> str:
     ]})
 
 
-# ─── Elastic MCP Knowledge Base Tool ───────────────────────────────────────────
+# --- Elastic Knowledge Base Tool ---------------------------------------------
 
 def search_incident_knowledge_base(query: str, max_results: int = 3) -> str:
     """Search the Elastic knowledge base for historical incidents matching the query.
 
     When ELASTICSEARCH_URL and ELASTICSEARCH_API_KEY are set in the environment,
-    this tool connects to a live Elasticsearch cluster via the Elastic MCP Server
-    (https://github.com/elastic/mcp-server-elasticsearch) and queries real incident
-    ticket data using semantic search.
+    this tool connects to a live Elasticsearch cluster through its REST API and
+    queries incident ticket data.
 
     When not configured, returns curated simulated ticket data for demo purposes.
 
@@ -169,11 +172,8 @@ def search_incident_knowledge_base(query: str, max_results: int = 3) -> str:
         JSON string with list of matching historical incidents and resolutions.
     """
     if MCP_ELASTIC_ACTIVE:
-        # ── Live Elastic MCP path ──────────────────────────────────────────────
-        # The Elastic MCP Server exposes the `search` tool which this function
-        # delegates to. In a full ADK deployment, this would be an MCPToolset
-        # registered with the RAG agent. Here we call the REST API directly
-        # so the function is usable in both ADK and fallback GenAI modes.
+        # Live Elasticsearch REST path
+        # The REST path is usable in both ADK and fallback GenAI modes.
         try:
             import httpx
             headers = {
@@ -207,12 +207,12 @@ def search_incident_knowledge_base(query: str, max_results: int = 3) -> str:
                 for h in hits
             ]
             return json.dumps({
-                "source": "elastic_mcp_live",
+                "source": "elastic_rest_live",
                 "query": query,
                 "historical_matches": matches
             }, indent=2)
         except Exception as e:
-            print(f"[Elastic MCP] [WARN] Live search failed ({e}), falling back to mock data")
+            print(f"[Elastic] [WARN] Live search failed ({e}), falling back to mock data")
 
     # ── Mock / offline path ────────────────────────────────────────────────────
     mock_tickets = [
@@ -398,7 +398,7 @@ class GenAIAgent:
 # ─── Live ADK Agent ─────────────────────────────────────────────────────────────
 
 class ADKAgent:
-    """Full Google ADK-backed agent with Gemini reasoning and MCP toolset support."""
+    """Google ADK-backed agent with Gemini reasoning and registered tools."""
 
     def __init__(self, name: str, instruction: str, tools=None):
         self.name = name
@@ -411,31 +411,12 @@ class ADKAgent:
 
     def _build(self):
         try:
-            # Register MCP Elastic toolset if configured
             all_tools = list(self.tool_fns)
-            if MCP_ELASTIC_ACTIVE and self.name == "rag_agent":
-                try:
-                    from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset, StdioServerParameters
-                    elastic_mcp = MCPToolset(
-                        connection_params=StdioServerParameters(
-                            command="npx",
-                            args=["-y", "@elastic/mcp-server-elasticsearch@latest"],
-                            env={
-                                "ES_URL":     ELASTICSEARCH_URL,
-                                "ES_API_KEY": ELASTICSEARCH_API_KEY,
-                            }
-                        )
-                    )
-                    all_tools.append(elastic_mcp)
-                    print(f"[ADKAgent:{self.name}] [MCP] Elastic MCP toolset registered")
-                except Exception as e:
-                    print(f"[ADKAgent:{self.name}] [WARN] Elastic MCP registration failed: {e}")
-
             self._agent = Agent(
                 name=self.name,
                 model=GEMINI_MODEL,
                 instruction=self.instruction,
-                tools=all_tools if all_tools else None,
+                tools=all_tools,
             )
             self._session_service = InMemorySessionService()
             self._runner = Runner(

@@ -37,6 +37,11 @@ class TestHealthEndpoint(unittest.TestCase):
         data = client.get("/").json()
         self.assertIn("endpoints", data)
 
+    def test_health_discloses_safety_boundary(self):
+        data = client.get("/").json()
+        self.assertEqual(data["diagnostics_source"], "simulated_diagnostic_tools")
+        self.assertTrue(data["remediation_requires_approval"])
+
 
 class TestResolveEndpoint(unittest.TestCase):
 
@@ -65,6 +70,12 @@ class TestResolveEndpoint(unittest.TestCase):
         data = self._post("CPU usage high on prod-web-02")
         self.assertIn("resolution_time_ms", data)
         self.assertGreaterEqual(data["resolution_time_ms"], 0)
+
+    def test_response_discloses_sources_and_approval_requirement(self):
+        data = self._post("database timeout prod-db-01")
+        self.assertEqual(data["diagnostics_source"], "simulated_diagnostic_tools")
+        self.assertTrue(data["remediation_requires_approval"])
+        self.assertIn("knowledge_source", data)
 
     def test_response_has_knowledge_base(self):
         data = self._post("database timeout prod-db-01")

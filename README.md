@@ -1,186 +1,173 @@
-# SysSentinel 🛡️
-### B2B IT Incident Resolution Orchestrator
-**Google Cloud Rapid Agent Hackathon — Track 1: Build (Net-New Agents) | Elastic Partner Track**
+# SysSentinel
 
-[![Python 3.11](https://img.shields.io/badge/Python-3.11-blue)](https://python.org)
-[![Google ADK](https://img.shields.io/badge/Google_ADK-2.2.0-orange)](https://google.github.io/adk-docs)
-[![Gemini 2.5 Flash](https://img.shields.io/badge/Gemini-2.5_Flash-purple)](https://ai.google.dev)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.136-green)](https://fastapi.tiangolo.com)
-[![Cloud Run](https://img.shields.io/badge/Deploy-Cloud_Run-blue)](https://cloud.google.com/run)
+### Human-in-the-loop IT incident investigation with Gemini and Google ADK
 
----
+**Google Cloud Rapid Agent Hackathon - Track 1: Build**
 
-SysSentinel reduces incident **Mean Time To Resolution from 47 minutes → under 90 seconds** by
-orchestrating three specialized Gemini-powered agents to triage, search historical tickets, run
-server diagnostics, and generate a ready-to-execute patch script — autonomously.
+SysSentinel turns a raw infrastructure alert into a structured, review-ready incident
+report. A Python orchestrator coordinates three specialized agents to classify the
+incident, retrieve similar historical resolutions, inspect diagnostic data, and propose
+a remediation script.
 
----
+The generated script is **never executed automatically**. It is clearly marked for
+operator review and approval.
+
+## Why It Matters
+
+On-call engineers often repeat the same investigation workflow: classify an alert,
+search past tickets, inspect the affected host, and draft a remediation. SysSentinel
+demonstrates how specialized agents can coordinate that workflow and return a useful
+first response in seconds.
 
 ## Architecture
 
-![SysSentinel Multi-Agent Architecture](./architecture_diagram.png)
-
-```
-  🚨 Incoming IT Alert
-         │
-         ▼
-  ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────────┐
-  │  Triage Agent   │────▶│   RAG Agent      │────▶│  Diagnostic Agent   │
-  │  Gemini 2.5     │     │  Gemini 2.5      │     │  Gemini 2.5 + MCP   │
-  │                 │     │                  │     │                     │
-  │ • Severity      │     │ • Elastic MCP    │     │ • check_disk_space  │
-  │ • Category      │     │ • Ticket history │     │ • check_db_conns    │
-  │ • Target server │     │ • Runbooks       │     │ • get_process_list  │
-  └─────────────────┘     └─────────────────┘     └─────────────────────┘
-         │                        │                         │
-         └────────────────────────┴─────────────────────────┘
-                                  │
-                                  ▼
-                    ✅ Incident Resolution Report
-                    (Severity · Action Plan · Patch Script)
+```mermaid
+flowchart LR
+    A[Incoming alert] --> T[Triage Agent]
+    T --> R[Knowledge Agent]
+    R --> D[Diagnostic Agent]
+    D --> O[Review-ready incident report]
+    R --> K[(Mock tickets or live Elasticsearch REST)]
+    D --> X[Simulated diagnostic tools]
+    O --> H[Human approval before execution]
 ```
 
----
+### Agent Responsibilities
 
-## Quick Start (3 steps)
+| Agent | Responsibility |
+|---|---|
+| Triage Agent | Classifies severity, category, and target host |
+| Knowledge Agent | Retrieves a relevant historical incident and resolution |
+| Diagnostic Agent | Inspects diagnostic data and drafts an action plan and script |
 
-### 1 — Clone & Install
+## Evidence Modes
+
+SysSentinel always reports which sources produced a result:
+
+| Field | Meaning |
+|---|---|
+| `run_mode` | `LIVE_ADK`, `LIVE_GENAI`, or `MOCK` |
+| `knowledge_source` | `elastic_rest_live` or `mock_knowledge_base` |
+| `diagnostics_source` | Currently `simulated_diagnostic_tools` |
+| `remediation_requires_approval` | Always `true` |
+
+Without credentials, the complete workflow runs deterministically in mock mode. This
+makes the project easy to evaluate while keeping live integrations explicit.
+
+## Quick Start
+
+Requirements: Python 3.11 and `pip`.
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/WEB.GOOGLE.Hackaton.git
-cd WEB.GOOGLE.Hackaton
+python -m venv .venv
 
-# Create virtual environment
-python -m venv venv
-.\venv\Scripts\activate          # Windows
-# source venv/bin/activate       # macOS / Linux
+# Windows
+.\.venv\Scripts\activate
+
+# macOS/Linux
+# source .venv/bin/activate
 
 pip install -r requirements.txt
+copy .env.example .env
 ```
 
-### 2 — Configure Environment
+Add a Gemini API key to `.env` for live reasoning. Without one, the app uses mock mode.
 
-```bash
-# Copy the template and fill in your keys
-copy .env.example .env          # Windows
-# cp .env.example .env          # macOS / Linux
-```
-
-Edit `.env`:
 ```env
-# Minimum required for live Gemini inference
-GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_API_KEY=your_key_here
+```
 
-# Optional: Elastic partner track MCP integration
+Optional live Elasticsearch ticket retrieval:
+
+```env
 ELASTICSEARCH_URL=https://your-cluster.es.io:443
-ELASTICSEARCH_API_KEY=your_elasticsearch_api_key_here
+ELASTICSEARCH_API_KEY=your_api_key_here
 ```
 
-> **Free tier note:** Without `GEMINI_API_KEY`, SysSentinel runs in MOCK simulation mode — 
-> fully functional for local demos at zero cost.
+### Run The API
 
-### 3 — Run
-
-**CLI mode (quick demo):**
-```bash
-# Default alert (DB connection timeout)
-python app/main.py
-
-# Custom alert
-python app/main.py --alert "Disk space critical on prod-web-02"
-python app/main.py --alert "Database connection pool exhausted in prod-db-01"
-```
-
-**API mode (hosted endpoint):**
 ```bash
 python app/api.py
-# → http://localhost:8080
-# → http://localhost:8080/docs  (Swagger UI)
-
-# Test it:
-curl -X POST http://localhost:8080/resolve \
-  -H "Content-Type: application/json" \
-  -d '{"alert": "Database connection pool timeout in prod-db-01"}'
 ```
 
----
-
-## Run Tests
+Open `http://localhost:8080/docs`, or call the API directly:
 
 ```bash
-# Agent + tool tests (offline, no API key needed)
-$env:PYTHONPATH="app"; python -m unittest app/test_agents.py -v
-
-# API endpoint tests (offline, no API key needed)
-$env:PYTHONPATH="app"; python -m unittest app/test_api.py -v
+curl -X POST http://localhost:8080/resolve \
+  -H "Content-Type: application/json" \
+  -d "{\"alert\":\"Database connection pool timeout in prod-db-01\",\"context\":\"production\"}"
 ```
 
----
+### Run The CLI Demo
 
-## Deploy to Google Cloud Run
+```bash
+python app/main.py
+python app/main.py --alert "Disk space critical on prod-web-02"
+```
 
-### Option A — One-command deploy (easiest)
+## API
+
+### `POST /resolve`
+
+Request:
+
+```json
+{
+  "alert": "Database connection pool timeout in prod-db-01",
+  "context": "production"
+}
+```
+
+The response contains triage, historical knowledge, diagnostics, a proposed action
+plan, a review-required script, elapsed time, and source disclosures.
+
+Other endpoints:
+
+- `GET /` - health, mode, and safety disclosure
+- `GET /resolve/examples` - judge-friendly example requests
+- `GET /docs` - interactive Swagger UI
+
+## Tests
+
+Tests run offline without credentials:
+
+```bash
+$env:PYTHONPATH="app"; python -m unittest discover -s app -p "test_*.py" -v
+```
+
+## Deploy To Cloud Run
+
+Use Secret Manager for the Gemini key:
+
 ```bash
 gcloud run deploy syssentinel \
   --source . \
   --region us-central1 \
   --allow-unauthenticated \
-  --set-env-vars GEMINI_API_KEY=your_key_here
+  --set-secrets="GEMINI_API_KEY=gemini-api-key:latest"
 ```
 
-### Option B — Docker build + push
-```bash
-docker build -t syssentinel .
-docker run -p 8080:8080 --env-file .env syssentinel
-```
+The included `Dockerfile` and `cloudbuild.yaml` provide container and CI/CD deployment
+paths.
 
-### Option C — Cloud Build CI/CD
-```bash
-gcloud builds submit --config cloudbuild.yaml
-```
+## Technology
 
----
+- Gemini 2.5 Flash for live reasoning
+- Google Agent Development Kit for live agent execution
+- FastAPI and Uvicorn for the webhook API
+- Google Cloud Run and Cloud Build for deployment
+- Optional Elasticsearch REST retrieval for historical tickets
+- Deterministic mock knowledge and diagnostics for reproducible evaluation
 
-## Project Structure
+## Current Boundaries
 
-```
-WEB.GOOGLE.Hackaton/
-├── app/
-│   ├── agents.py         # Multi-agent definitions + tools + Elastic MCP
-│   ├── api.py            # FastAPI web endpoint (POST /resolve)
-│   ├── main.py           # CLI runner
-│   ├── test_agents.py    # Agent + tool unit tests
-│   └── test_api.py       # API endpoint tests
-├── Dockerfile            # Multi-stage container for Cloud Run
-├── cloudbuild.yaml       # Cloud Build CI/CD pipeline
-├── requirements.txt      # Python dependencies
-├── .env.example          # Environment variable template
-├── .gitignore            # Excludes .env, __pycache__, venv
-├── README.md             # This file
-└── submission.md         # Hackathon entry form
-```
+- Diagnostic tools use simulated data; they do not connect to production hosts.
+- Generated remediation scripts require human review and are not executed.
+- Elastic MCP is a future integration path. The current optional live integration uses
+  the Elasticsearch REST API.
+- Claimed operational savings require validation in a real deployment.
 
----
+## Submission Materials
 
-## Technologies
-
-| Component | Technology |
-|---|---|
-| Reasoning | Gemini 2.5 Flash |
-| Orchestration | Google Agent Development Kit (ADK) 2.2.0 |
-| MCP Integration | Elastic MCP Server (`@elastic/mcp-server-elasticsearch`) |
-| Web API | FastAPI + Uvicorn |
-| Infrastructure | Google Cloud Run |
-| Build / CI | Google Cloud Build |
-| Knowledge Base | Elasticsearch (via Elastic MCP) |
-
----
-
-## Business Impact
-
-| Metric | Before SysSentinel | After SysSentinel |
-|---|---|---|
-| Mean Time To Resolution | ~47 minutes | < 90 seconds |
-| L1 Engineer involvement | 100% of alerts | ~20% (edge cases) |
-| Cost per incident | ~$480 (3.2 hrs × $150/hr) | ~$12 (compute only) |
-| Alerts auto-resolved | 0% | ~80% of known patterns |
+- [Hackathon submission narrative](./SUBMISSION.md)
+- [Three-minute demo guide](./DEMO.md)

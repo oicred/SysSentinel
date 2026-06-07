@@ -174,6 +174,41 @@ class TestRunMode(unittest.TestCase):
         if not os.environ.get("GEMINI_API_KEY"):
             self.assertEqual(get_run_mode(), "MOCK")
 
+    def test_adk_agent_builds_when_adk_is_available(self):
+        try:
+            import google.adk  # noqa: F401
+            import agents
+            from google.adk.agents import Agent
+            from google.adk.runners import Runner
+            from google.adk.sessions import InMemorySessionService
+            from google.genai.types import Content, Part
+        except ImportError:
+            self.skipTest("Google ADK is not installed")
+
+        original_values = (
+            agents.Agent if hasattr(agents, "Agent") else None,
+            agents.Runner if hasattr(agents, "Runner") else None,
+            agents.InMemorySessionService if hasattr(agents, "InMemorySessionService") else None,
+            agents.Content if hasattr(agents, "Content") else None,
+            agents.Part if hasattr(agents, "Part") else None,
+        )
+        agents.Agent = Agent
+        agents.Runner = Runner
+        agents.InMemorySessionService = InMemorySessionService
+        agents.Content = Content
+        agents.Part = Part
+        try:
+            agent = agents.ADKAgent("triage_agent", "Return JSON")
+            self.assertIsNotNone(agent._runner)
+        finally:
+            (
+                agents.Agent,
+                agents.Runner,
+                agents.InMemorySessionService,
+                agents.Content,
+                agents.Part,
+            ) = original_values
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

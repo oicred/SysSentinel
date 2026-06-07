@@ -18,13 +18,7 @@ steps:
       - '--memory=512Mi'
       - '--cpu=1'
       - '--max-instances=10'
-      - '--set-env-vars=GEMINI_API_KEY=$$GEMINI_API_KEY'
-    secretEnv: ['GEMINI_API_KEY']
-
-availableSecrets:
-  secretManager:
-    - versionName: projects/$PROJECT_ID/secrets/gemini-api-key/versions/latest
-      env: 'GEMINI_API_KEY'
+      - '--set-secrets=GEMINI_API_KEY=gemini-api-key:latest'
 
 images:
   - 'gcr.io/$PROJECT_ID/syssentinel:$COMMIT_SHA'

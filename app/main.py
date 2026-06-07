@@ -1,13 +1,22 @@
 import sys
 import argparse
 import json
-from agents import create_agent, check_disk_space, check_db_connections, get_process_list
+from agents import (
+    create_agent,
+    check_disk_space,
+    check_db_connections,
+    get_process_list,
+    search_incident_knowledge_base,
+    get_run_mode,
+)
 
 def run_incident_resolution_flow(alert_text: str):
     print("=" * 60)
     print("      SYSSENTINEL: IT ALERT RESOLUTION ORCHESTRATOR      ")
     print("=" * 60)
     print(f"[Input Alert]: {alert_text}\n")
+    print(f"[Run Mode]: {get_run_mode()}")
+    print("[Safety]: Generated remediation requires human approval.\n")
 
     # 1. Triage Phase
     print("[Step 1] Initializing Triage Agent...")
@@ -44,7 +53,11 @@ def run_incident_resolution_flow(alert_text: str):
         "You are a Knowledge Base Assistant. Search historical support tickets and runbooks "
         "to find past resolutions for similar issues."
     )
-    rag_agent = create_agent("rag_agent", rag_instruction)
+    rag_agent = create_agent(
+        "rag_agent",
+        rag_instruction,
+        tools=[search_incident_knowledge_base],
+    )
     
     query = f"{triage_data.get('category')} - {triage_data.get('alert')}"
     print(f"[Step 2] Querying knowledge base for: '{query}'...")
@@ -84,7 +97,7 @@ def run_incident_resolution_flow(alert_text: str):
     except json.JSONDecodeError:
         diag_data = {
             "server": server_id,
-            "diagnostic_run": "Diagnostics completed.",
+            "diagnostic_summary": "Diagnostics completed.",
             "recommended_patch_script": "# Check system parameters manually",
             "action_plan": diag_output_raw
         }
@@ -97,7 +110,7 @@ def run_incident_resolution_flow(alert_text: str):
     print(f"Severity      : {triage_data.get('severity')}")
     print(f"Incident Cat  : {triage_data.get('category')}")
     print("\n--- Diagnostic Findings ---")
-    print(diag_data.get("diagnostic_run"))
+    print(diag_data.get("diagnostic_summary"))
     
     print("\n--- Historical Knowledge Match ---")
     for match in rag_data.get("historical_matches", []):
@@ -107,7 +120,7 @@ def run_incident_resolution_flow(alert_text: str):
     print("\n--- Action Plan ---")
     print(diag_data.get("action_plan"))
     
-    print("\n--- Recommended Patch Script ---")
+    print("\n--- Recommended Patch Script (REVIEW BEFORE EXECUTION) ---")
     print("\033[92m" + diag_data.get("recommended_patch_script") + "\033[0m")
     print("=" * 60)
 
