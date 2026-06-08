@@ -75,7 +75,11 @@ Add a Gemini API key to `.env` for live reasoning. Without one, the app uses moc
 
 ```env
 GEMINI_API_KEY=your_key_here
+DEMO_API_KEY=generate_a_long_random_value
 ```
+
+When live Gemini is enabled, `DEMO_API_KEY` is required and protects `POST /resolve`.
+Mock mode remains keyless for easy offline evaluation.
 
 Optional live Elasticsearch ticket retrieval:
 
@@ -95,6 +99,7 @@ Open `http://localhost:8080/docs`, or call the API directly:
 ```bash
 curl -X POST http://localhost:8080/resolve \
   -H "Content-Type: application/json" \
+  -H "X-Demo-Key: your_demo_key" \
   -d "{\"alert\":\"Database connection pool timeout in prod-db-01\",\"context\":\"production\"}"
 ```
 
@@ -108,6 +113,9 @@ python app/main.py --alert "Disk space critical on prod-web-02"
 ## API
 
 ### `POST /resolve`
+
+Live deployments require the private `X-Demo-Key` request header. The header appears in
+Swagger UI as an input field. Keep the key out of GitHub and public submission text.
 
 Request:
 
@@ -137,18 +145,10 @@ $env:PYTHONPATH="app"; python -m unittest discover -s app -p "test_*.py" -v
 
 ## Deploy To Cloud Run
 
-Use Secret Manager for the Gemini key:
-
-```bash
-gcloud run deploy syssentinel \
-  --source . \
-  --region us-central1 \
-  --allow-unauthenticated \
-  --set-secrets="GEMINI_API_KEY=gemini-api-key:latest"
-```
-
-The included `Dockerfile` and `cloudbuild.yaml` provide container and CI/CD deployment
-paths.
+Follow [DEPLOYMENT.md](./DEPLOYMENT.md) for the dedicated-project, least-privilege,
+Secret Manager, budget, GitHub publication, and shutdown workflow. The included
+`cloudbuild.yaml` limits the public demo to one instance and injects pinned secret
+versions.
 
 ## Technology
 
@@ -171,3 +171,7 @@ paths.
 
 - [Hackathon submission narrative](./SUBMISSION.md)
 - [Three-minute demo guide](./DEMO.md)
+- [Secure GitHub and Google Cloud deployment guide](./DEPLOYMENT.md)
+
+These root documents are the canonical public submission materials. Internal drafts and
+non-delivery notes belong in the ignored `_private_submission/` folder.

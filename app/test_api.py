@@ -9,13 +9,14 @@ import json
 import sys
 import os
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(__file__))
 
 from fastapi.testclient import TestClient
-from api import app
+import api
 
-client = TestClient(app)
+client = TestClient(api.app, raise_server_exceptions=False)
 
 
 class TestHealthEndpoint(unittest.TestCase):
@@ -41,6 +42,17 @@ class TestHealthEndpoint(unittest.TestCase):
         data = client.get("/").json()
         self.assertEqual(data["diagnostics_source"], "simulated_diagnostic_tools")
         self.assertTrue(data["remediation_requires_approval"])
+        expected = bool(api.DEMO_API_KEY) or api.get_run_mode() != "MOCK"
+        self.assertEqual(data["live_demo_key_required"], expected)
+
+    def test_cross_origin_requests_are_not_enabled(self):
+        resp = client.get("/", headers={"Origin": "https://example.com"})
+        self.assertNotIn("access-control-allow-origin", resp.headers)
+
+    def test_openapi_documents_demo_key_header(self):
+        schema = client.get("/openapi.json").json()
+        parameters = schema["paths"]["/resolve"]["post"]["parameters"]
+        self.assertTrue(any(p["name"] == "X-Demo-Key" and p["in"] == "header" for p in parameters))
 
 
 class TestResolveEndpoint(unittest.TestCase):
@@ -90,6 +102,59 @@ class TestResolveEndpoint(unittest.TestCase):
     def test_missing_alert_returns_422(self):
         resp = client.post("/resolve", json={})
         self.assertEqual(resp.status_code, 422)
+
+    def test_unknown_field_returns_422(self):
+        resp = client.post("/resolve", json={"alert": "disk issue", "unexpected": True})
+        self.assertEqual(resp.status_code, 422)
+
+    def test_alert_length_limit_returns_422(self):
+        resp = client.post("/resolve", json={"alert": "x" * 501})
+        self.assertEqual(resp.status_code, 422)
+
+    def test_context_length_limit_returns_422(self):
+        resp = client.post("/resolve", json={"alert": "disk issue", "context": "x" * 101})
+        self.assertEqual(resp.status_code, 422)
+
+    def test_request_body_size_limit_returns_413(self):
+        resp = client.post("/resolve", content="x" * 4097)
+        self.assertEqual(resp.status_code, 413)
+
+    def test_mock_mode_without_configured_key_is_keyless(self):
+        with patch.object(api, "DEMO_API_KEY", ""), patch.object(api, "get_run_mode", return_value="MOCK"):
+            resp = client.post("/resolve", json={"alert": "disk issue"})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_configured_demo_key_is_required(self):
+        with patch.object(api, "DEMO_API_KEY", "private-demo-key"):
+            missing = client.post("/resolve", json={"alert": "disk issue"})
+            invalid = client.post(
+                "/resolve",
+                headers={"X-Demo-Key": "wrong-key"},
+                json={"alert": "disk issue"},
+            )
+        self.assertEqual(missing.status_code, 401)
+        self.assertEqual(invalid.status_code, 401)
+
+    def test_valid_demo_key_allows_request(self):
+        with patch.object(api, "DEMO_API_KEY", "private-demo-key"):
+            resp = client.post(
+                "/resolve",
+                headers={"X-Demo-Key": "private-demo-key"},
+                json={"alert": "disk issue"},
+            )
+        self.assertEqual(resp.status_code, 200)
+
+    def test_live_mode_without_configured_key_fails_closed(self):
+        with patch.object(api, "DEMO_API_KEY", ""), patch.object(api, "get_run_mode", return_value="LIVE_ADK"):
+            resp = client.post("/resolve", json={"alert": "disk issue"})
+        self.assertEqual(resp.status_code, 503)
+
+    def test_pipeline_error_is_generic(self):
+        with patch.object(api, "run_pipeline", side_effect=RuntimeError("sensitive internal detail")):
+            resp = client.post("/resolve", json={"alert": "disk issue"})
+        self.assertEqual(resp.status_code, 500)
+        self.assertEqual(resp.json()["detail"], "Incident resolution failed.")
+        self.assertNotIn("sensitive internal detail", resp.text)
 
 
 class TestExamplesEndpoint(unittest.TestCase):

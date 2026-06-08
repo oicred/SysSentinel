@@ -20,6 +20,10 @@ The API returns a structured incident report and discloses whether Gemini, mock 
 or live Elasticsearch retrieval produced each result. Remediation scripts are proposals
 only and always require operator approval.
 
+The public Cloud Run demo keeps informational endpoints open for judges while protecting
+live `POST /resolve` calls with a privately shared demo key. Secrets are injected from
+Google Secret Manager and the service is constrained to one Cloud Run instance.
+
 ## Technologies Used
 
 - Gemini 2.5 Flash
@@ -27,6 +31,7 @@ only and always require operator approval.
 - FastAPI and Uvicorn
 - Google Cloud Run
 - Google Cloud Build
+- Google Secret Manager
 - Optional Elasticsearch REST API integration
 
 ## Data Sources

@@ -29,11 +29,9 @@ Thumbs.db
 # Logs
 *.log
 
-# Docker
-*.dockerignore
-
 # ADK
 .adk/
 
-# Submission Docs
+# Private working materials
 _submission_docs/
+_private_submission/

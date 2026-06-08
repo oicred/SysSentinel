@@ -12,18 +12,19 @@ Deploy locally:
   uvicorn app.api:app --reload --port 8080
 
 Deploy to Cloud Run:
-  gcloud run deploy syssentinel --source . --region us-central1 --allow-unauthenticated
+  Follow DEPLOYMENT.md for the secured, cost-controlled deployment.
 """
 
 import json
 import sys
 import os
+import hmac
+import logging
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 # Allow running from repo root OR from app/ directory
 sys.path.insert(0, os.path.dirname(__file__))
@@ -37,6 +38,12 @@ from agents import (
     get_run_mode,
     is_elastic_active,
 )
+
+logger = logging.getLogger("syssentinel.api")
+DEMO_API_KEY = os.environ.get("DEMO_API_KEY", "")
+MAX_ALERT_LENGTH = 500
+MAX_CONTEXT_LENGTH = 100
+MAX_REQUEST_BYTES = 4096
 
 # ─── App Setup ─────────────────────────────────────────────────────────────────
 
@@ -52,27 +59,39 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET", "POST"],
-    allow_headers=["*"],
-)
-
+@app.middleware("http")
+async def reject_oversized_resolve_requests(request: Request, call_next):
+    if request.method == "POST" and request.url.path == "/resolve":
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > MAX_REQUEST_BYTES:
+                    return JSONResponse(
+                        status_code=413,
+                        content={"detail": "Request body is too large."},
+                    )
+            except ValueError:
+                return JSONResponse(
+                    status_code=400,
+                    content={"detail": "Invalid Content-Length header."},
+                )
+    return await call_next(request)
 
 # ─── Request / Response Models ──────────────────────────────────────────────────
 
 class ResolveRequest(BaseModel):
-    alert: str
-    context: Optional[str] = None  # Optional extra context (e.g. environment name)
-
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
             "examples": [
                 {"alert": "Database connection pool timeout in prod-db-01"},
                 {"alert": "Disk space critical on prod-web-02", "context": "production"},
             ]
-        }
+        },
+    )
+
+    alert: str = Field(min_length=1, max_length=MAX_ALERT_LENGTH)
+    context: Optional[str] = Field(default=None, max_length=MAX_CONTEXT_LENGTH)
 
 
 class TriageResult(BaseModel):
@@ -102,6 +121,7 @@ class ResolveResponse(BaseModel):
     knowledge_source: str
     diagnostics_source: str
     remediation_requires_approval: bool
+    live_demo_key_required: bool
     triage: TriageResult
     knowledge_base: RAGResult
     diagnostics: DiagnosticResult
@@ -116,6 +136,16 @@ def _parse_json_or_wrap(raw: str, fallback_key: str = "response") -> dict:
         return json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return {fallback_key: str(raw)}
+
+
+def _authorize_resolve_request(provided_key: Optional[str]) -> None:
+    """Allow keyless mock demos, but fail closed before any live model call."""
+    if get_run_mode() == "MOCK" and not DEMO_API_KEY:
+        return
+    if not DEMO_API_KEY:
+        raise HTTPException(status_code=503, detail="Live demo is not configured securely.")
+    if not provided_key or not hmac.compare_digest(provided_key, DEMO_API_KEY):
+        raise HTTPException(status_code=401, detail="Invalid or missing demo key.")
 
 
 def run_pipeline(alert: str, context: Optional[str] = None) -> dict:
@@ -196,6 +226,7 @@ def run_pipeline(alert: str, context: Optional[str] = None) -> dict:
         "knowledge_source": rag_data.get("source", "unknown"),
         "diagnostics_source": "simulated_diagnostic_tools",
         "remediation_requires_approval": True,
+        "live_demo_key_required": bool(DEMO_API_KEY) or get_run_mode() != "MOCK",
         "triage": triage_data,
         "knowledge_base": rag_data,
         "diagnostics": diag_data,
@@ -216,6 +247,7 @@ def health_check():
         "elastic_live_search_active": is_elastic_active(),
         "diagnostics_source": "simulated_diagnostic_tools",
         "remediation_requires_approval": True,
+        "live_demo_key_required": bool(DEMO_API_KEY) or get_run_mode() != "MOCK",
         "hackathon": "Google Cloud Rapid Agent Hackathon — Track 1: Build",
         "optional_integration": "Elasticsearch REST API",
         "endpoints": {
@@ -227,7 +259,10 @@ def health_check():
 
 
 @app.post("/resolve", response_model=ResolveResponse, tags=["Agents"])
-def resolve_incident(request: ResolveRequest):
+def resolve_incident(
+    request: ResolveRequest,
+    x_demo_key: Optional[str] = Header(default=None, alias="X-Demo-Key"),
+):
     """
     Run the full multi-agent incident resolution pipeline.
 
@@ -239,14 +274,19 @@ def resolve_incident(request: ResolveRequest):
     Returns a structured incident report with an action plan and a remediation
     script that must be reviewed and approved by an operator before execution.
     """
-    if not request.alert or not request.alert.strip():
+    _authorize_resolve_request(x_demo_key)
+
+    if not request.alert.strip():
         raise HTTPException(status_code=422, detail="alert field must not be empty")
 
     try:
         result = run_pipeline(request.alert.strip(), request.context)
         return JSONResponse(content=result)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Pipeline error: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Incident resolution pipeline failed")
+        raise HTTPException(status_code=500, detail="Incident resolution failed.")
 
 
 @app.get("/resolve/examples", tags=["Agents"])

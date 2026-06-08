@@ -4,8 +4,9 @@
 
 1. Deploy or run the API and open `/docs`.
 2. Confirm `GET /` clearly shows the intended `run_mode`.
-3. If live Gemini is unavailable, use mock mode and state that clearly.
-4. Keep the terminal visible so judges can see the service mode.
+3. Enter the private judge key in Swagger's `X-Demo-Key` field for live mode.
+4. If live Gemini is unavailable, use mock mode and state that clearly.
+5. Keep the terminal visible so judges can see the service mode.
 
 ## Script
 
@@ -60,3 +61,4 @@ Show the Cloud Run URL or local API, test command, and repository structure. Clo
 - Do not claim the generated script was executed.
 - Do not claim Elastic MCP unless a separate verified MCP integration is added.
 - Keep the response source fields visible for judges.
+- Never show or read the private demo key in the recording.
