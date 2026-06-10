@@ -167,11 +167,3 @@ versions.
   the Elasticsearch REST API.
 - Claimed operational savings require validation in a real deployment.
 
-## Submission Materials
-
-- [Hackathon submission narrative](./SUBMISSION.md)
-- [Three-minute demo guide](./DEMO.md)
-- [Secure GitHub and Google Cloud deployment guide](./DEPLOYMENT.md)
-
-These root documents are the canonical public submission materials. Internal drafts and
-non-delivery notes belong in the ignored `_private_submission/` folder.
